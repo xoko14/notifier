@@ -1,0 +1,13 @@
+[package]
+name = "notifier-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+color-eyre = "0.6.5"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-tungstenite = "0.30.0"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rmp-serde = "1.3.1"
+notifier-common = { path = "../notifier-common" }
+winrt-toast-reborn = "0.3.8"

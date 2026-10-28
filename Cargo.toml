@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["crates/notifier-client", "crates/notifier-common", "crates/notifier-server"]
