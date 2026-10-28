@@ -13,7 +13,7 @@ use axum::{
 };
 use axum_extra::{TypedHeader, headers};
 use color_eyre::eyre::Result;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::{
     net::TcpListener,
     sync::{
@@ -87,10 +87,13 @@ async fn handle_socket(
 
         let bytes = rmp_serde::to_vec(&msg).unwrap();
 
-        socket
+        let res = socket
             .send(Message::Binary(Bytes::copy_from_slice(bytes.as_slice())))
-            .await
-            .unwrap();
+            .await;
+
+        if let Err(_) = res {
+            break;
+        }
     }
     db.lock().await.remove(&id);
 }
@@ -103,7 +106,7 @@ struct SendRequest {
 }
 
 async fn send_msg(State(db): State<Db>, Json(request): Json<SendRequest>) -> impl IntoResponse {
-    let db = db.lock().await;
+    let mut db = db.lock().await;
     let sender = match db.get(&request.target) {
         Some(sender) => sender,
         None => return StatusCode::NOT_FOUND.into_response(),
@@ -116,7 +119,8 @@ async fn send_msg(State(db): State<Db>, Json(request): Json<SendRequest>) -> imp
 
     if let Err(err) = result {
         tracing::error!("{}", err);
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        db.remove(&request.target);
+        return StatusCode::CONFLICT.into_response();
     }
 
     StatusCode::OK.into_response()
