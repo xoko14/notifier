@@ -13,6 +13,7 @@ use axum::{
 };
 use axum_extra::{TypedHeader, headers};
 use color_eyre::eyre::Result;
+use notifier_common::WebSocketAction;
 use serde::Deserialize;
 use tokio::{
     net::TcpListener,
@@ -24,7 +25,7 @@ use tokio::{
 use tracing::{Level, info};
 
 type NotifierMessage = notifier_common::Message;
-type Db = Arc<Mutex<HashMap<String, UnboundedSender<NotifierMessage>>>>;
+type Db = Arc<Mutex<HashMap<String, UnboundedSender<WebSocketAction>>>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,6 +39,7 @@ async fn main() -> Result<()> {
         .route("/ws", any(ws_handler))
         .route("/send", post(send_msg))
         .route("/clients", get(get_clients))
+        .route("/clients/refresh", post(test_all_clients))
         .with_state(db);
 
     let listener = TcpListener::bind("0.0.0.0:3000").await?;
@@ -66,7 +68,7 @@ async fn ws_handler(
 
     info!("\"{}\" connected", id);
 
-    let (sender, reciever) = unbounded_channel::<NotifierMessage>();
+    let (sender, reciever) = unbounded_channel::<WebSocketAction>();
     db.lock().await.insert(id.clone(), sender);
 
     ws.on_failed_upgrade(|error| tracing::error!("Error upgrading ws: {}", error))
@@ -76,7 +78,7 @@ async fn ws_handler(
 async fn handle_socket(
     id: String,
     mut socket: WebSocket,
-    mut reciever: UnboundedReceiver<NotifierMessage>,
+    mut reciever: UnboundedReceiver<WebSocketAction>,
     db: Db,
 ) {
     loop {
@@ -112,10 +114,12 @@ async fn send_msg(State(db): State<Db>, Json(request): Json<SendRequest>) -> imp
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    let result = sender.send(NotifierMessage {
+    let action = WebSocketAction::Message(NotifierMessage {
         from: request.from,
         text: request.message,
     });
+
+    let result = sender.send(action);
 
     if let Err(err) = result {
         tracing::error!("{}", err);
@@ -130,4 +134,17 @@ async fn get_clients(State(db): State<Db>) -> impl IntoResponse {
     let db = db.lock().await;
     let clients: Vec<String> = db.keys().into_iter().map(|k| k.to_owned()).collect();
     Json(clients)
+}
+
+async fn test_all_clients(State(db): State<Db>) -> impl IntoResponse {
+    let mut db = db.lock().await;
+    for (key, sender) in db
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<Vec<_>>()
+    {
+        if sender.send(WebSocketAction::NoAction).is_err() {
+            db.remove(&key);
+        };
+    }
 }

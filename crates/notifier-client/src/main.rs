@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use color_eyre::Result;
 use futures_util::StreamExt;
+use notifier_common::WebSocketAction;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -50,14 +51,22 @@ async fn ws_logic(manager: &ToastManager) -> Result<()> {
             _ => continue,
         };
 
-        let message: NotifierMessage = rmp_serde::from_slice(bytes.iter().as_slice()).unwrap();
+        let message: WebSocketAction = rmp_serde::from_slice(bytes.iter().as_slice()).unwrap();
 
-        let mut toast = Toast::new();
-        toast
-            .text1(format!("{} says", message.from))
-            .text2(message.text);
-
-        manager.show(&toast)?;
+        match message {
+            WebSocketAction::Message(message) => display_message(message, manager)?,
+            WebSocketAction::NoAction => {}
+        }
     }
+    Ok(())
+}
+
+fn display_message(message: NotifierMessage, manager: &ToastManager) -> Result<()> {
+    let mut toast = Toast::new();
+    toast
+        .text1(format!("{} says", message.from))
+        .text2(message.text);
+
+    manager.show(&toast)?;
     Ok(())
 }
