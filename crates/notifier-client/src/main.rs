@@ -1,10 +1,11 @@
 //#![windows_subsystem = "windows"]
 
-use std::time::Duration;
+use std::{env::current_exe, path::PathBuf, time::Duration};
 
-use color_eyre::Result;
+use color_eyre::{Result, eyre::OptionExt};
 use futures_util::StreamExt;
 use notifier_common::WebSocketAction;
+use shortcuts_rs::ShellLink;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -24,6 +25,7 @@ const BASE_URL: &str = "ws://localhost:3000";
 #[tokio::main]
 async fn main() -> Result<()> {
     register(APP_ID, "Evil notifier", None)?;
+    setup()?;
 
     let manager = ToastManager::new(APP_ID);
 
@@ -68,5 +70,24 @@ fn display_message(message: NotifierMessage, manager: &ToastManager) -> Result<(
         .text2(message.text);
 
     manager.show(&toast)?;
+    Ok(())
+}
+
+fn setup() -> Result<()> {
+    let home = env_home::env_home_dir().ok_or_eyre("Can't find home path")?;
+    let mut startup_path = PathBuf::from(home);
+    startup_path.push("AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup");
+    let mut link_path = startup_path.clone();
+    link_path.push("notifier.lnk");
+
+    if link_path.exists() {
+        return Ok(());
+    }
+
+    let current_exectutable = current_exe()?;
+
+    let link = ShellLink::new(current_exectutable, None, None, None)?;
+    link.create_lnk(link_path)?;
+
     Ok(())
 }
