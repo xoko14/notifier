@@ -26,7 +26,7 @@ use tokio_tungstenite::{
         http::{HeaderValue, header::USER_AGENT},
     },
 };
-use winrt_toast_reborn::{Toast, ToastManager, register};
+use winrt_toast_reborn::{Action, Toast, ToastManager, register};
 
 use crate::keys::{KEYS, char_to_keys, get_random_puppy_key};
 
@@ -49,10 +49,11 @@ static PUPPY_CONFIG: LazyLock<Arc<Mutex<PuppyModeConfig>>> = LazyLock::new(|| {
 async fn main() -> Result<()> {
     register(APP_ID, "Evil notifier", None)?;
     setup()?;
-
     handle_keyboard_events();
 
-    let manager = ToastManager::new(APP_ID);
+    let manager = ToastManager::new(APP_ID).on_activated(Some("puppy_mode_disable"), |_action| {
+        (*PUPPY_CONFIG.lock().unwrap()).enabled = false;
+    });
 
     loop {
         let result = ws_logic(&manager).await;
@@ -82,9 +83,7 @@ async fn ws_logic(manager: &ToastManager) -> Result<()> {
 
         match message {
             WebSocketAction::Message(message) => display_message(message, manager)?,
-            WebSocketAction::PuppyModeConfig(config) => {
-                *PUPPY_CONFIG.lock().unwrap() = config;
-            }
+            WebSocketAction::PuppyModeConfig(config) => handle_puppy_mode_config(config, manager)?,
             WebSocketAction::NoAction => {}
         }
     }
@@ -183,6 +182,26 @@ fn display_message(message: NotifierMessage, manager: &ToastManager) -> Result<(
     toast
         .text1(format!("{} says", message.from))
         .text2(message.text);
+
+    manager.show(&toast)?;
+    Ok(())
+}
+
+fn handle_puppy_mode_config(config: PuppyModeConfig, manager: &ToastManager) -> Result<()> {
+    *PUPPY_CONFIG.lock().unwrap() = config.clone();
+    let mut toast = Toast::new();
+    if config.enabled {
+        let action =
+            Action::new("Disable", "puppy_mode_disable", "").with_input_id("puppy_mode_disable");
+        toast
+            .text1("Hiii puppy")
+            .text2(format!("Puppy mode is enabled"))
+            .action(action);
+    } else {
+        toast
+            .text1("Hiii puppy")
+            .text2(format!("Puppy mode was disabled"));
+    }
 
     manager.show(&toast)?;
     Ok(())
