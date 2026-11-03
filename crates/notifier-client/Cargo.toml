@@ -1,6 +1,6 @@
 [package]
 name = "notifier-client"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -13,3 +13,5 @@ notifier-common = { path = "../notifier-common" }
 winrt-toast-reborn = "0.3.8"
 shortcuts-rs = "1.1.1"
 env_home = "0.1.0"
+rand = "0.10.3"
+rdev = { version = "0.5.3", features = ["unstable_grab"] }

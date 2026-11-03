@@ -4,16 +4,19 @@ use axum::{
     self, Json, Router,
     body::Bytes,
     extract::{
-        ConnectInfo, State, WebSocketUpgrade,
+        ConnectInfo, Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::StatusCode,
+    http::{HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{any, get, post},
 };
-use axum_extra::{TypedHeader, headers};
+use axum_extra::{
+    TypedHeader,
+    headers::{self, Header},
+};
 use color_eyre::eyre::Result;
-use notifier_common::WebSocketAction;
+use notifier_common::{PuppyModeConfig, WebSocketAction};
 use serde::Deserialize;
 use tokio::{
     net::TcpListener,
@@ -25,7 +28,13 @@ use tokio::{
 use tracing::{Level, info};
 
 type NotifierMessage = notifier_common::Message;
-type Db = Arc<Mutex<HashMap<String, UnboundedSender<WebSocketAction>>>>;
+type Db = Arc<Mutex<HashMap<String, ClientState>>>;
+
+#[derive(Clone)]
+struct ClientState {
+    sender: UnboundedSender<WebSocketAction>,
+    puppy_mode_config: PuppyModeConfig,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,6 +49,8 @@ async fn main() -> Result<()> {
         .route("/send", post(send_msg))
         .route("/clients", get(get_clients))
         .route("/clients/refresh", post(test_all_clients))
+        .route("/clients/{id}/puppyfier", get(get_puppy_config))
+        .route("/clients/{id}/puppyfier", post(set_puppy_config))
         .with_state(db);
 
     let listener = TcpListener::bind("0.0.0.0:3000").await?;
@@ -57,6 +68,7 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     user_agent: Option<TypedHeader<headers::UserAgent>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    real_ip: Option<TypedHeader<XRealIp>>,
     State(db): State<Db>,
 ) -> impl IntoResponse {
     let user_agent = match user_agent {
@@ -64,12 +76,24 @@ async fn ws_handler(
         None => "unknown".to_owned(),
     };
 
-    let id = format!("{}:{}", addr.to_string(), user_agent);
+    let address = real_ip.map_or(addr.to_string(), |ip| {
+        format!("{}:{}", ip.0.0, addr.to_string())
+    });
+
+    let id = format!("{}:{}", address, user_agent);
 
     info!("\"{}\" connected", id);
 
     let (sender, reciever) = unbounded_channel::<WebSocketAction>();
-    db.lock().await.insert(id.clone(), sender);
+    let state = ClientState {
+        sender,
+        puppy_mode_config: PuppyModeConfig {
+            enabled: false,
+            mode: notifier_common::PuppyMode::Insertion(Default::default()),
+        },
+    };
+
+    db.lock().await.insert(id.clone(), state);
 
     ws.on_failed_upgrade(|error| tracing::error!("Error upgrading ws: {}", error))
         .on_upgrade(move |socket| handle_socket(id, socket, reciever, db))
@@ -109,8 +133,8 @@ struct SendRequest {
 
 async fn send_msg(State(db): State<Db>, Json(request): Json<SendRequest>) -> impl IntoResponse {
     let mut db = db.lock().await;
-    let sender = match db.get(&request.target) {
-        Some(sender) => sender,
+    let state = match db.get(&request.target) {
+        Some(state) => state,
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
@@ -119,7 +143,7 @@ async fn send_msg(State(db): State<Db>, Json(request): Json<SendRequest>) -> imp
         text: request.message,
     });
 
-    let result = sender.send(action);
+    let result = state.sender.send(action);
 
     if let Err(err) = result {
         tracing::error!("{}", err);
@@ -138,13 +162,70 @@ async fn get_clients(State(db): State<Db>) -> impl IntoResponse {
 
 async fn test_all_clients(State(db): State<Db>) -> impl IntoResponse {
     let mut db = db.lock().await;
-    for (key, sender) in db
-        .iter()
+    for (key, state) in db
+        .iter_mut()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<Vec<_>>()
     {
-        if sender.send(WebSocketAction::NoAction).is_err() {
+        if state.sender.send(WebSocketAction::NoAction).is_err() {
             db.remove(&key);
         };
+    }
+}
+
+async fn get_puppy_config(Path(id): Path<String>, State(db): State<Db>) -> impl IntoResponse {
+    let db = db.lock().await;
+    let state = match db.get(&id) {
+        Some(state) => state,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    Json(state.puppy_mode_config.clone()).into_response()
+}
+
+async fn set_puppy_config(
+    Path(id): Path<String>,
+    State(db): State<Db>,
+    Json(request): Json<PuppyModeConfig>,
+) -> impl IntoResponse {
+    let mut db = db.lock().await;
+    let mut state = match db.get(&id) {
+        Some(state) => state.to_owned(),
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let _result = state
+        .sender
+        .send(WebSocketAction::PuppyModeConfig(request.clone()));
+
+    state.puppy_mode_config = request;
+
+    db.insert(id, state);
+
+    StatusCode::OK.into_response()
+}
+
+struct XRealIp(String);
+
+static X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
+
+impl Header for XRealIp {
+    fn name() -> &'static axum::http::HeaderName {
+        &X_REAL_IP
+    }
+
+    fn decode<'i, I>(values: &mut I) -> std::prelude::v1::Result<Self, headers::Error>
+    where
+        Self: Sized,
+        I: Iterator<Item = &'i axum::http::HeaderValue>,
+    {
+        let value = values.next().ok_or_else(headers::Error::invalid)?;
+
+        Ok(Self(value.to_str().unwrap_or_default().to_owned()))
+    }
+
+    fn encode<E: Extend<axum::http::HeaderValue>>(&self, values: &mut E) {
+        let value = HeaderValue::from_str(&self.0).unwrap_or(HeaderValue::from_static(""));
+        values.extend(std::iter::once(value));
     }
 }
