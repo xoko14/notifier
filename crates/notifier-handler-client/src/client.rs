@@ -1,4 +1,5 @@
 use color_eyre::Result;
+use notifier_common::PuppyModeConfig;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +49,14 @@ impl NotifierClient {
 
     fn build_url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    pub fn set_puppy_mode(&self, target: &str, request: PuppyModeConfig) -> Result<()> {
+        self.client
+            .post(self.build_url(&format!("/clients/{}/puppyfier", target)))
+            .json(&request)
+            .send()?;
+        Ok(())
     }
 }
 

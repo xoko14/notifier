@@ -11,3 +11,4 @@ directories = "6.0.0"
 kdl = "6.7.1"
 reqwest = { version = "0.13.5", features = ["blocking", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
+notifier-common = {path="../notifier-common"}

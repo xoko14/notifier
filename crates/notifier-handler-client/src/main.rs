@@ -8,8 +8,8 @@ use std::{
 use clap::ArgMatches;
 use color_eyre::Result;
 use directories::ProjectDirs;
-use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
-use serde::{Deserialize, Serialize};
+use kdl::{KdlDocument, KdlEntry, KdlNode};
+use notifier_common::{PuppyInsertionMode, PuppyModeConfig};
 
 use crate::client::NotifierClient;
 
@@ -27,6 +27,7 @@ fn main() {
         Some(("config", matches)) => config(matches),
         Some(("clients", matches)) => clients(matches),
         Some(("send", matches)) => send(matches),
+        Some(("puppyfier", matches)) => puppyfier(matches),
         _ => unreachable!(),
     };
 }
@@ -116,6 +117,88 @@ fn send(matches: &ArgMatches) {
     client.send(&target, &alias, message.as_str()).unwrap();
 }
 
+fn puppyfier(matches: &ArgMatches) {
+    match matches.subcommand() {
+        Some(("list", _)) => puppyfier_list(),
+        Some(("set", matches)) => puppyfier_set(matches),
+        Some(("enable", matches)) => puppyfier_enable(matches, true),
+        Some(("disable", matches)) => puppyfier_enable(matches, false),
+        Some(("view", matches)) => puppyfier_view(matches),
+        _ => unreachable!(),
+    }
+}
+
+fn puppyfier_list() {
+    let mut config = get_config_or_default();
+    for alias in config_get_puppy_config_aliases(&mut config) {
+        println!("{}", alias);
+    }
+}
+
+fn puppyfier_set(matches: &ArgMatches) {
+    let alias: &String = matches.get_one("alias").unwrap();
+    let mut config = get_config_or_default();
+    let mut puppy_config = config_get_puppy_config(&mut config, alias);
+
+    match matches.subcommand() {
+        Some(("probability", matches)) => {
+            let value: &String = matches.get_one("value").unwrap();
+            config_set_prop(&mut puppy_config, "probability", value.to_owned());
+        }
+        Some(("words", matches)) => {
+            let values = matches
+                .get_many::<String>("values")
+                .unwrap_or_default()
+                .map(|v| v.to_owned())
+                .collect::<Vec<_>>();
+            config_set_prop_many(&mut puppy_config, "words", values);
+        }
+        _ => unreachable!(),
+    };
+
+    write_config(&config).unwrap();
+}
+
+fn puppyfier_enable(matches: &ArgMatches, enabled: bool) {
+    let alias: &String = matches.get_one("alias").unwrap();
+    let target: &String = matches.get_one("target").unwrap();
+
+    let mut config = get_config_or_default();
+    let puppy_config = config_get_puppy_config(&mut config, alias);
+    if puppy_config.nodes().is_empty() {
+        eprintln!("No valid configuration found for alias \"{}\"!", alias);
+        return;
+    }
+    let mut puppy_mode_request = config_map_puppy_mode_request(puppy_config);
+    puppy_mode_request.enabled = enabled;
+
+    let base_url = config_get_prop(&config, "server_url").unwrap_or_default();
+    let client = NotifierClient::new(&base_url);
+    let clients = refresh_and_get_clients(&client);
+    let target = match clients.into_iter().find(|c| c.contains(target)) {
+        Some(t) => t,
+        None => {
+            eprintln!("No client found that matches \"{}\"!", target);
+            return;
+        }
+    };
+
+    client.set_puppy_mode(&target, puppy_mode_request).unwrap();
+}
+
+fn puppyfier_view(matches: &ArgMatches) {
+    let alias: &String = matches.get_one("alias").unwrap();
+    let mut config = get_config_or_default();
+    let puppy_config = config_get_puppy_config(&mut config, alias);
+
+    let probability = config_get_prop(&puppy_config, "probability").unwrap_or_default();
+    let words = config_get_prop_many(&puppy_config, "words");
+
+    println!("{}:", alias);
+    println!("  - probability: {}", probability);
+    println!("  - words: {}", words.join(", "));
+}
+
 fn refresh_and_get_clients(client: &NotifierClient) -> Vec<String> {
     client.refresh_clients().unwrap();
     client.refresh_clients().unwrap();
@@ -165,6 +248,25 @@ fn config_set_prop(config: &mut KdlDocument, prop_name: &str, value: String) {
     }
 }
 
+fn config_set_prop_many(config: &mut KdlDocument, prop_name: &str, values: Vec<String>) {
+    match config.get_mut(prop_name) {
+        Some(prop) => {
+            let entries = prop.entries_mut();
+            entries.clear();
+            for value in values {
+                entries.push(KdlEntry::new(value));
+            }
+        }
+        None => {
+            let mut node = KdlNode::new(prop_name);
+            for value in values {
+                node.entries_mut().push(KdlEntry::new(value));
+            }
+            config.nodes_mut().push(node);
+        }
+    }
+}
+
 fn config_get_prop(config: &KdlDocument, prop_name: &str) -> Option<String> {
     match config.get(prop_name) {
         Some(prop) => prop
@@ -172,5 +274,73 @@ fn config_get_prop(config: &KdlDocument, prop_name: &str) -> Option<String> {
             .map(|e| e.value().as_string().map(|s| s.to_owned()))
             .flatten(),
         None => return None,
+    }
+}
+
+fn config_get_prop_many(config: &KdlDocument, prop_name: &str) -> Vec<String> {
+    match config.get(prop_name) {
+        Some(prop) => prop
+            .entries()
+            .iter()
+            .map(|e| e.value().as_string().unwrap_or_default().to_owned())
+            .collect(),
+        None => vec![],
+    }
+}
+
+fn config_get_puppy_config<'a>(config: &'a mut KdlDocument, alias: &str) -> &'a mut KdlDocument {
+    if let None = config.get("puppy_config") {
+        let node = KdlNode::new("puppy_config");
+        config.nodes_mut().push(node);
+    }
+    let section = config.get_mut("puppy_config").unwrap();
+
+    if let None = section.children() {
+        section.set_children(KdlDocument::new());
+    }
+    let children = section.children_mut().as_mut().unwrap();
+
+    if let None = children.get(alias) {
+        let node = KdlNode::new(alias);
+        children.nodes_mut().push(node);
+    }
+    let alias_node = children.get_mut(alias).unwrap();
+
+    if let None = alias_node.children() {
+        alias_node.set_children(KdlDocument::new());
+    }
+    alias_node.children_mut().as_mut().unwrap()
+}
+
+fn config_get_puppy_config_aliases(config: &mut KdlDocument) -> Vec<String> {
+    if let None = config.get("puppy_config") {
+        let node = KdlNode::new("puppy_config");
+        config.nodes_mut().push(node);
+    }
+    let section = config.get_mut("puppy_config").unwrap();
+
+    if let None = section.children() {
+        section.set_children(KdlDocument::new());
+    }
+    let children = section.children().unwrap();
+
+    children
+        .nodes()
+        .iter()
+        .map(|n| n.name().value().to_owned())
+        .collect()
+}
+
+fn config_map_puppy_mode_request(puppy_config: &KdlDocument) -> PuppyModeConfig {
+    let percentage = config_get_prop(puppy_config, "probability").unwrap_or(String::new());
+    let words = config_get_prop_many(puppy_config, "words");
+    let percentage = percentage.parse().unwrap_or(0);
+
+    PuppyModeConfig {
+        enabled: false,
+        mode: notifier_common::PuppyMode::Insertion(PuppyInsertionMode {
+            probability: percentage,
+            puppy_words: words,
+        }),
     }
 }
